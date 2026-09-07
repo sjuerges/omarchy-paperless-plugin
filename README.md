@@ -2,7 +2,7 @@
 
 A beautiful, highly integrated status bar widget and sliding inbox details panel for [Omarchy](https://omarchy.org/) systems, built to manage your [Paperless-ngx](https://docs.paperless-ngx.com/) document inbox in real time directly from your Wayland top bar.
 
-![Paperless Inbox Preview](https://raw.githubusercontent.com/basecamp/omarchy/main/shell/plugins/README.md) *(Placeholder for plugin screenshots)*
+<img width="1131" height="333" alt="image" src="https://github.com/user-attachments/assets/707e16e0-ad61-475f-97bf-049c8ea56908" />
 
 ## Features
 
