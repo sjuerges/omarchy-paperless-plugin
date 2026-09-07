@@ -30,7 +30,7 @@ Panel {
   property int previewDocId: 0
 
   // Smoothly animated panel width
-  readonly property real targetWidth: Style.space(720) + (previewDocId !== 0 ? Style.space(380) + Style.space(14) : 0)
+  readonly property real targetWidth: Style.space(720) + (previewDocId !== 0 ? largePreview.width + Style.space(14) : 0)
   property real currentPanelWidth: Style.space(720)
 
   Behavior on currentPanelWidth {
@@ -120,6 +120,8 @@ Panel {
     downloadThumbsProc.command = ["bash", "-c", cmd]
     downloadThumbsProc.running = true
   }
+
+
 
   function updateDocumentTags(docId, nextTags) {
     var data = { tags: nextTags }
@@ -333,6 +335,8 @@ Panel {
     }
   }
 
+
+
   Process {
     id: patchDocProc
     running: false
@@ -513,7 +517,7 @@ Panel {
         // Large Preview Panel (on the left)
         BorderSurface {
           id: largePreview
-          width: root.previewDocId !== 0 ? Style.space(380) : 0
+          width: root.previewDocId !== 0 ? (largeImage.status === Image.Ready ? Math.min(Style.space(400), (largePreview.height - Style.space(24)) * (largeImage.implicitWidth / largeImage.implicitHeight) + Style.space(24)) : Style.space(250)) : 0
           height: parent.height
           clip: true
           visible: width > 0
@@ -538,9 +542,45 @@ Panel {
               smooth: true
             }
 
-            // Click image to close/shrink
+            // Beautiful Magnifier/Zoom Lens
+            Rectangle {
+              id: zoomLens
+              // Lens stays centered on mouse but clamped within the previewMouseArea bounds
+              x: Math.max(0, Math.min(previewMouseArea.width - width, previewMouseArea.mouseX - width / 2))
+              y: Math.max(0, Math.min(previewMouseArea.height - height, previewMouseArea.mouseY - height / 2))
+              width: Style.space(200)
+              height: Style.space(200)
+              radius: width / 2
+              color: "#1a1a1a" // Dark fallback background for high contrast
+              border.color: Color.accent
+              border.width: Style.space(3)
+              clip: true
+              visible: previewMouseArea.containsMouse && root.previewDocId !== 0
+              enabled: false // Transparent to hover/mouse events
+
+              // Magnification factor
+              property real scaleFactor: 2.2
+
+              Image {
+                id: zoomImage
+                source: "file:///tmp/paperless_thumbs/" + root.previewDocId + ".png?v=" + root.thumbBuster
+                fillMode: Image.PreserveAspectFit
+                smooth: true
+                asynchronous: true
+                width: largeImage.width * zoomLens.scaleFactor
+                height: largeImage.height * zoomLens.scaleFactor
+
+                // Position the magnified source relative to the lens so that the point under the mouse is centered
+                x: zoomLens.width / 2 - previewMouseArea.mouseX * zoomLens.scaleFactor
+                y: zoomLens.height / 2 - previewMouseArea.mouseY * zoomLens.scaleFactor
+              }
+            }
+
+            // Click image to close/shrink (placed on top of zoomLens so zoomLens never intercepts events)
             MouseArea {
+              id: previewMouseArea
               anchors.fill: parent
+              hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onClicked: {
                 root.previewDocId = 0
@@ -681,7 +721,7 @@ Panel {
           Flickable {
             visible: root.inboxDocuments.length > 0
             width: parent.width
-            height: Math.min(Style.space(480), documentsColumn.implicitHeight)
+            height: root.previewDocId !== 0 ? Style.space(520) : Math.min(Style.space(480), documentsColumn.implicitHeight)
             contentWidth: width
             contentHeight: documentsColumn.implicitHeight
             clip: true
