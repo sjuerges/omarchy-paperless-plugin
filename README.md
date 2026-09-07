@@ -119,4 +119,4 @@ To completely disable and remove the plugin from your status bar and system:
 
 ---
 
-*Developed with  by Sebastian and Gemini CLI.*
+*Developed with ❤️ by Sebastian and Gemini CLI.*
