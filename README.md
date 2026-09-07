@@ -52,4 +52,71 @@ The JSON structure contains:
 
 ---
 
+## Installation & Setup
+
+You can install and configure the plugin either directly via the official Omarchy CLI or manually if you prefer to customize the source.
+
+### Method 1: Using the Omarchy CLI (Recommended)
+
+1. **Add and enable the plugin** directly from GitHub:
+   ```bash
+   omarchy plugin add https://github.com/sjuerges/omarchy-paperless-plugin.git --enable
+   ```
+
+2. **Add the widget to your status bar** (for example, in the center section right after the clock):
+   ```bash
+   omarchy bar put paperless --after omarchy.clock
+   ```
+
+### Method 2: Manual Installation (For active development)
+
+1. **Clone the repository** into your local Omarchy plugins directory:
+   ```bash
+   git clone https://github.com/sjuerges/omarchy-paperless-plugin.git ~/.config/omarchy/plugins/paperless
+   ```
+
+2. **Enable the plugin**:
+   ```bash
+   omarchy plugin enable paperless
+   ```
+
+3. **Add the widget to your status bar**:
+   ```bash
+   omarchy bar put paperless --after omarchy.clock
+   ```
+
+Once installed, clicking the widget for the first time will automatically launch the setup wizard so you can enter your server URL and API credentials securely.
+
+---
+
+## Uninstallation & Removal
+
+To completely disable and remove the plugin from your status bar and system:
+
+### Standard Removal (CLI-installed)
+
+1. **Disable the plugin** to stop it and remove it from the running shell:
+   ```bash
+   omarchy plugin disable paperless
+   ```
+
+2. **Remove the plugin files** from the system:
+   ```bash
+   omarchy plugin remove paperless
+   ```
+
+### Manual Removal
+
+1. **Disable the plugin**:
+   ```bash
+   omarchy plugin disable paperless
+   ```
+
+2. **Delete the plugin directory**:
+   ```bash
+   rm -rf ~/.config/omarchy/plugins/paperless
+   ```
+
+---
+
 *Developed with  by Sebastian and Gemini CLI.*
