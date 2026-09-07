@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "paperless",
+  "name": "Paperless-ngx",
+  "version": "1.0.0",
+  "author": "Sebastian & Gemini CLI",
+  "description": "Paperless-ngx inbox and document manager in your top bar",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Paperless-ngx",
+    "description": "Paperless-ngx inbox and document manager in your top bar",
+    "category": "Office",
+    "allowMultiple": false
+  }
+}
