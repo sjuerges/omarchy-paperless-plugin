@@ -12,8 +12,8 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "paperless-ngx",
-    "description": "Paperless-ngx inbox and document manager in your top bar",
+    "displayName": "paperless-ngx-inbox",
+    "description": "paperless-ngx inbox and document manager in your top bar",
     "category": "Office",
     "allowMultiple": false
   }
