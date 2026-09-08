@@ -45,6 +45,16 @@ BarWidget {
   onBarChanged: injectPanel()
   onSettingsChanged: injectPanel()
 
+  Timer {
+    id: autoRefreshTimer
+    interval: 5 * 60 * 1000 // 5 minutes in milliseconds
+    running: true
+    repeat: true
+    onTriggered: {
+      root.refresh()
+    }
+  }
+
   Loader {
     id: panelLoader
     active: true
