@@ -101,64 +101,99 @@ Panel {
     return null
   }
 
+  function isUrlSecure(url) {
+    var cleanUrl = url.trim()
+    if (cleanUrl.startsWith("https://")) {
+      return true
+    }
+    if (cleanUrl.startsWith("http://")) {
+      var remainder = ""
+      if (cleanUrl.startsWith("http://localhost")) {
+        remainder = cleanUrl.substring(16)
+      } else if (cleanUrl.startsWith("http://127.0.0.1")) {
+        remainder = cleanUrl.substring(16)
+      } else if (cleanUrl.startsWith("http://[::1]")) {
+        remainder = cleanUrl.substring(12)
+      } else {
+        return false
+      }
+      if (remainder === "" || remainder.startsWith("/") || remainder.startsWith(":")) {
+        return true
+      }
+    }
+    return false
+  }
+
   function apiRequest(method, endpoint, bodyData, onSuccess, onFailure) {
     if (!root.paperlessUrl || !root.paperlessToken) {
       if (onFailure) onFailure("Not configured")
       return
     }
 
-    var xhr = new XMLHttpRequest()
+    if (!root.isUrlSecure(root.paperlessUrl)) {
+      console.log("Error: Insecure paperless URL configured:", root.paperlessUrl)
+      if (onFailure) onFailure("Insecure URL")
+      return
+    }
+
+    var cmd = "read -r TOKEN\n"
+            + "read -r BODY\n"
+            + "METHOD=\"$1\"\n"
+            + "URL=\"$2\"\n"
+            + "BODY_TEMP=\"\"\n"
+            + "if [ -n \"$BODY\" ]; then\n"
+            + "  BODY_TEMP=$(mktemp)\n"
+            + "  chmod 600 \"$BODY_TEMP\"\n"
+            + "  printf '%s' \"$BODY\" > \"$BODY_TEMP\"\n"
+            + "fi\n"
+            + "CURL_CFG=$(mktemp)\n"
+            + "HEADER_OUT=$(mktemp)\n"
+            + "TEMP_OUT=$(mktemp)\n"
+            + "chmod 600 \"$CURL_CFG\" \"$HEADER_OUT\" \"$TEMP_OUT\"\n"
+            + "cleanup() {\n"
+            + "  rm -f \"$CURL_CFG\" \"$BODY_TEMP\" \"$HEADER_OUT\" \"$TEMP_OUT\"\n"
+            + "}\n"
+            + "trap cleanup EXIT\n"
+            + "printf 'request = \"%s\"\\nurl = \"%s\"\\nheader = \"Authorization: Token %s\"\\n' \"$METHOD\" \"$URL\" \"$TOKEN\" > \"$CURL_CFG\"\n"
+            + "if [ -n \"$BODY_TEMP\" ]; then\n"
+            + "  printf 'header = \"Content-Type: application/json\"\\ndata-binary = \"@%s\"\\n' \"$BODY_TEMP\" >> \"$CURL_CFG\"\n"
+            + "fi\n"
+            + "if curl -fsS --connect-timeout 5 --max-time 15 --config \"$CURL_CFG\" -D \"$HEADER_OUT\" | head -c 5242881 > \"$TEMP_OUT\"; then\n"
+            + "  HTTP_CODE=\"\"\n"
+            + "  if [ -s \"$HEADER_OUT\" ]; then\n"
+            + "    read -r _ HTTP_CODE _ < \"$HEADER_OUT\"\n"
+            + "  fi\n"
+            + "  SIZE=$(stat -c %s \"$TEMP_OUT\")\n"
+            + "  if [ \"$SIZE\" -gt 5242880 ]; then\n"
+            + "    echo \"Error: API response exceeded safety limit of 5MB\" >&2\n"
+            + "    exit 2\n"
+            + "  fi\n"
+            + "  if [ -n \"$HTTP_CODE\" ] && [ \"$HTTP_CODE\" -ge 200 ] && [ \"$HTTP_CODE\" -lt 300 ]; then\n"
+            + "    cat \"$TEMP_OUT\"\n"
+            + "    exit 0\n"
+            + "  else\n"
+            + "    echo \"HTTP Error: $HTTP_CODE\" >&2\n"
+            + "    cat \"$TEMP_OUT\" >&2\n"
+            + "    exit 3\n"
+            + "  fi\n"
+            + "else\n"
+            + "  echo \"Curl execution failed\" >&2\n"
+            + "  exit 4\n"
+            + "fi"
+
     var url = root.paperlessUrl + endpoint
-    
-    xhr.open(method, url, true)
-    xhr.setRequestHeader("Authorization", "Token " + root.paperlessToken)
-    if (bodyData) {
-      xhr.setRequestHeader("Content-Type", "application/json")
-    }
-    
-    xhr.timeout = 15000 // 15s deadline
-    
-    xhr.ontimeout = function() {
-      console.log("API Request timeout for endpoint:", endpoint)
-      if (onFailure) onFailure("Timeout")
-    }
-    
-    xhr.onerror = function() {
-      console.log("API Request network error for endpoint:", endpoint)
-      if (onFailure) onFailure("Network Error")
-    }
-    
-    xhr.onreadystatechange = function() {
-      if (xhr.readyState === XMLHttpRequest.DONE) {
-        var responseText = xhr.responseText || ""
-        if (responseText.length > 5 * 1024 * 1024) { // 5MB limit
-          console.log("API Response exceeded safety limit of 5MB")
-          if (onFailure) onFailure("Response too large")
-          return
-        }
-        
-        if (xhr.status >= 200 && xhr.status < 300) {
-          if (onSuccess) {
-            try {
-              var parsed = JSON.parse(responseText)
-              onSuccess(parsed)
-            } catch (e) {
-              console.log("Failed to parse response JSON:", e)
-              if (onFailure) onFailure("Parse Error")
-            }
-          }
-        } else {
-          console.log("API Request failed with status:", xhr.status, "body:", responseText)
-          if (onFailure) onFailure("Status " + xhr.status)
-        }
-      }
-    }
-    
-    if (bodyData) {
-      xhr.send(JSON.stringify(bodyData))
-    } else {
-      xhr.send()
-    }
+    var args = ["bash", "-c", cmd, "api-request-script", method, url]
+
+    var proc = apiProcComponent.createObject(root, {
+      "command": args,
+      "onSuccess": onSuccess,
+      "onFailure": onFailure
+    })
+
+    proc.stdinEnabled = true
+    proc.running = true
+    proc.write(root.paperlessToken + "\n" + (bodyData ? JSON.stringify(bodyData) : "") + "\n")
+    proc.stdinEnabled = false
   }
 
   function fetchCorrespondents() {
@@ -271,9 +306,16 @@ Panel {
             + "    continue\n"
             + "  fi\n"
             + "  TEMP=$(mktemp \"$THUMB_DIR/thumb.XXXXXX\")\n"
+            + "  chmod 600 \"$TEMP\"\n"
             + "  URL=\"${PAPERLESS_URL}/api/documents/${id}/thumb/\"\n"
-            + "  if printf 'header = \"Authorization: Token %s\"\\nurl = \"%s\"\\n' \"$TOKEN\" \"$URL\" | curl -fsS --connect-timeout 5 --max-time 15 --config - -o \"$TEMP\"; then\n"
-            + "    mv \"$TEMP\" \"$DEST\"\n"
+            + "  if printf 'header = \"Authorization: Token %s\"\\nurl = \"%s\"\\n' \"$TOKEN\" \"$URL\" | curl -fsS --connect-timeout 5 --max-time 15 --config - | head -c 1048577 > \"$TEMP\"; then\n"
+            + "    SIZE=$(stat -c %s \"$TEMP\")\n"
+            + "    if [ \"$SIZE\" -le 1048576 ] && [ \"$SIZE\" -gt 0 ]; then\n"
+            + "      chmod 600 \"$TEMP\"\n"
+            + "      mv \"$TEMP\" \"$DEST\"\n"
+            + "    else\n"
+            + "      rm -f \"$TEMP\"\n"
+            + "    fi\n"
             + "  else\n"
             + "    rm -f \"$TEMP\"\n"
             + "  fi\n"
@@ -364,8 +406,8 @@ Panel {
       cleanUrl = cleanUrl.substring(0, cleanUrl.length - 1)
     }
 
-    if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
-      console.log("Error: Invalid paperless URL protocol (must start with http:// or https://)")
+    if (!root.isUrlSecure(cleanUrl)) {
+      console.log("Error: Invalid paperless URL protocol (must start with https:// or localhost-only http://)")
       return
     }
 
@@ -460,6 +502,52 @@ Panel {
         root.loadConfiguration()
       } else {
         console.log("Failed to save configuration")
+      }
+    }
+  }
+
+  Component {
+    id: apiProcComponent
+    Process {
+      id: proc
+      stdinEnabled: true
+      property var onSuccess
+      property var onFailure
+
+      stdout: StdioCollector {
+        id: apiStdout
+        waitForEnd: true
+      }
+      
+      stderr: StdioCollector {
+        id: apiStderr
+        waitForEnd: true
+      }
+
+      onExited: function(exitCode) {
+        if (exitCode === 0) {
+          var raw = String(apiStdout.text || "").trim()
+          if (onSuccess) {
+            try {
+              var parsed = JSON.parse(raw)
+              onSuccess(parsed)
+            } catch (e) {
+              console.log("Failed to parse response JSON:", e)
+              if (onFailure) onFailure("Parse Error")
+            }
+          }
+        } else {
+          var errText = String(apiStderr.text || "").trim()
+          console.log("API Request failed with exit code:", exitCode, "error:", errText)
+          if (onFailure) {
+            if (exitCode === 2) {
+              onFailure("Response too large")
+            } else {
+              onFailure("Status " + exitCode)
+            }
+          }
+        }
+        proc.destroy()
       }
     }
   }
