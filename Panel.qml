@@ -29,6 +29,8 @@ Panel {
   property int thumbBuster: 0
   property int previewDocId: 0
 
+  readonly property string thumbDir: (Quickshell.env("XDG_RUNTIME_DIR") ? Quickshell.env("XDG_RUNTIME_DIR") : (Quickshell.env("HOME") || "") + "/.cache") + "/omarchy/paperless_thumbs"
+
   // Smoothly animated panel width
   readonly property real targetWidth: Style.space(720) + (previewDocId !== 0 ? largePreview.width + Style.space(14) : 0)
   property real currentPanelWidth: Style.space(720)
@@ -99,50 +101,211 @@ Panel {
     return null
   }
 
+  function apiRequest(method, endpoint, bodyData, onSuccess, onFailure) {
+    if (!root.paperlessUrl || !root.paperlessToken) {
+      if (onFailure) onFailure("Not configured")
+      return
+    }
+
+    var xhr = new XMLHttpRequest()
+    var url = root.paperlessUrl + endpoint
+    
+    xhr.open(method, url, true)
+    xhr.setRequestHeader("Authorization", "Token " + root.paperlessToken)
+    if (bodyData) {
+      xhr.setRequestHeader("Content-Type", "application/json")
+    }
+    
+    xhr.timeout = 15000 // 15s deadline
+    
+    xhr.ontimeout = function() {
+      console.log("API Request timeout for endpoint:", endpoint)
+      if (onFailure) onFailure("Timeout")
+    }
+    
+    xhr.onerror = function() {
+      console.log("API Request network error for endpoint:", endpoint)
+      if (onFailure) onFailure("Network Error")
+    }
+    
+    xhr.onreadystatechange = function() {
+      if (xhr.readyState === XMLHttpRequest.DONE) {
+        var responseText = xhr.responseText || ""
+        if (responseText.length > 5 * 1024 * 1024) { // 5MB limit
+          console.log("API Response exceeded safety limit of 5MB")
+          if (onFailure) onFailure("Response too large")
+          return
+        }
+        
+        if (xhr.status >= 200 && xhr.status < 300) {
+          if (onSuccess) {
+            try {
+              var parsed = JSON.parse(responseText)
+              onSuccess(parsed)
+            } catch (e) {
+              console.log("Failed to parse response JSON:", e)
+              if (onFailure) onFailure("Parse Error")
+            }
+          }
+        } else {
+          console.log("API Request failed with status:", xhr.status, "body:", responseText)
+          if (onFailure) onFailure("Status " + xhr.status)
+        }
+      }
+    }
+    
+    if (bodyData) {
+      xhr.send(JSON.stringify(bodyData))
+    } else {
+      xhr.send()
+    }
+  }
+
+  function fetchCorrespondents() {
+    root.apiRequest("GET", "/api/correspondents/?page_size=1000", null, function(data) {
+      if (data && Array.isArray(data.results)) {
+        var validated = []
+        var limit = Math.min(data.results.length, 1000)
+        for (var i = 0; i < limit; i++) {
+          var item = data.results[i]
+          if (item && typeof item.id === 'number' && typeof item.name === 'string') {
+            validated.push({
+              id: item.id,
+              name: item.name.substring(0, 256)
+            })
+          }
+        }
+        root.correspondents = validated
+        root.rebuildCorrespondentOptions()
+      }
+    })
+  }
+
+  function fetchTags() {
+    root.apiRequest("GET", "/api/tags/?page_size=1000", null, function(data) {
+      if (data && Array.isArray(data.results)) {
+        var validated = []
+        var limit = Math.min(data.results.length, 1000)
+        for (var i = 0; i < limit; i++) {
+          var item = data.results[i]
+          if (item && typeof item.id === 'number' && typeof item.name === 'string') {
+            validated.push({
+              id: item.id,
+              name: item.name.substring(0, 256),
+              color: typeof item.color === 'string' ? item.color.substring(0, 16) : "#444444",
+              text_color: typeof item.text_color === 'string' ? item.text_color.substring(0, 16) : "#ffffff",
+              is_inbox_tag: !!item.is_inbox_tag
+            })
+          }
+        }
+        root.tags = validated
+        for (var j = 0; j < validated.length; j++) {
+          if (validated[j].is_inbox_tag) {
+            root.inboxTagId = validated[j].id
+            break
+          }
+        }
+      }
+    })
+  }
+
+  function fetchInbox() {
+    root.isFetching = true
+    root.apiRequest("GET", "/api/documents/?is_in_inbox=true&limit=100", null, function(data) {
+      root.isFetching = false
+      if (data && Array.isArray(data.results)) {
+        var validated = []
+        var limit = Math.min(data.results.length, 100)
+        for (var i = 0; i < limit; i++) {
+          var item = data.results[i]
+          if (item && typeof item.id === 'number' && typeof item.title === 'string') {
+            var tagsArray = []
+            if (Array.isArray(item.tags)) {
+              var tagsLimit = Math.min(item.tags.length, 100)
+              for (var t = 0; t < tagsLimit; t++) {
+                if (typeof item.tags[t] === 'number') {
+                  tagsArray.push(item.tags[t])
+                }
+              }
+            }
+            validated.push({
+              id: item.id,
+              title: item.title.substring(0, 512),
+              correspondent: typeof item.correspondent === 'number' ? item.correspondent : null,
+              created_date: typeof item.created_date === 'string' ? item.created_date.substring(0, 64) : "",
+              created: typeof item.created === 'string' ? item.created.substring(0, 64) : "",
+              tags: tagsArray
+            })
+          }
+        }
+        root.inboxDocuments = validated
+        root.inboxCount = typeof data.count === 'number' ? data.count : validated.length
+        root.downloadThumbnails(validated)
+      }
+    }, function() {
+      root.isFetching = false
+    })
+  }
+
   function refresh() {
     if (root.paperlessUrl && root.paperlessToken) {
-      root.isFetching = true
-      fetchInboxProc.running = true
+      root.fetchInbox()
     }
   }
 
   function downloadThumbnails(docs) {
     if (!docs || docs.length === 0) return
-    var cmd = "mkdir -p /tmp/paperless_thumbs && "
+    
+    var cmd = "read -r TOKEN\n"
+            + "PAPERLESS_URL=\"$1\"\n"
+            + "shift\n"
+            + "if [ -n \"$XDG_RUNTIME_DIR\" ]; then\n"
+            + "  THUMB_DIR=\"$XDG_RUNTIME_DIR/omarchy/paperless_thumbs\"\n"
+            + "else\n"
+            + "  THUMB_DIR=\"$HOME/.cache/omarchy/paperless_thumbs\"\n"
+            + "fi\n"
+            + "mkdir -p -m 700 \"$THUMB_DIR\"\n"
+            + "for id in \"$@\"; do\n"
+            + "  DEST=\"$THUMB_DIR/${id}.png\"\n"
+            + "  if [ -f \"$DEST\" ] && [ ! -L \"$DEST\" ]; then\n"
+            + "    continue\n"
+            + "  fi\n"
+            + "  TEMP=$(mktemp \"$THUMB_DIR/thumb.XXXXXX\")\n"
+            + "  URL=\"${PAPERLESS_URL}/api/documents/${id}/thumb/\"\n"
+            + "  if printf 'header = \"Authorization: Token %s\"\\nurl = \"%s\"\\n' \"$TOKEN\" \"$URL\" | curl -fsS --connect-timeout 5 --max-time 15 --config - -o \"$TEMP\"; then\n"
+            + "    mv \"$TEMP\" \"$DEST\"\n"
+            + "  else\n"
+            + "    rm -f \"$TEMP\"\n"
+            + "  fi\n"
+            + "done"
+
+    var args = ["bash", "-c", cmd, "download-script", root.paperlessUrl]
     for (var i = 0; i < docs.length; i++) {
-      var id = docs[i].id
-      var url = root.paperlessUrl + "/api/documents/" + id + "/thumb/"
-      var dest = "/tmp/paperless_thumbs/" + id + ".png"
-      cmd += "if [ ! -f " + dest + " ]; then curl -fsS -H 'Authorization: Token " + root.paperlessToken + "' '" + url + "' -o " + dest + " & fi; "
+      args.push(String(docs[i].id))
     }
-    cmd += "wait"
 
-    downloadThumbsProc.command = ["bash", "-c", cmd]
+    downloadThumbsProc.command = args
+    downloadThumbsProc.stdinEnabled = true
     downloadThumbsProc.running = true
+    downloadThumbsProc.write(root.paperlessToken + "\n")
+    downloadThumbsProc.stdinEnabled = false
   }
-
-
 
   function updateDocumentTags(docId, nextTags) {
     var data = { tags: nextTags }
-    patchDocument(docId, data)
+    root.patchDocument(docId, data)
   }
 
   function updateDocumentCorrespondent(docId, nextCorrId) {
     var data = { correspondent: nextCorrId }
-    patchDocument(docId, data)
+    root.patchDocument(docId, data)
   }
 
   function patchDocument(docId, data) {
     console.log("PATCH document called:", docId, JSON.stringify(data))
-    patchDocProc.command = [
-      "curl", "-fsS", "-X", "PATCH",
-      "-H", "Authorization: Token " + root.paperlessToken,
-      "-H", "Content-Type: application/json",
-      "-d", JSON.stringify(data),
-      root.paperlessUrl + "/api/documents/" + docId + "/"
-    ]
-    patchDocProc.running = true
+    root.apiRequest("PATCH", "/api/documents/" + docId + "/", data, function() {
+      root.refresh()
+    })
   }
 
   function removeTagFromDocument(docId, tagId, currentTags) {
@@ -153,7 +316,7 @@ Panel {
         nextTags.push(currentTags[i])
       }
     }
-    updateDocumentTags(docId, nextTags)
+    root.updateDocumentTags(docId, nextTags)
   }
 
   function addTagToDocument(docId, tagId, currentTags) {
@@ -168,23 +331,20 @@ Panel {
     }
     nextTags.push(tagId)
     console.log("Calculated nextTags array:", JSON.stringify(nextTags))
-    updateDocumentTags(docId, nextTags)
+    root.updateDocumentTags(docId, nextTags)
   }
 
   function markDocumentDone(docId, currentTags) {
-    removeTagFromDocument(docId, root.inboxTagId, currentTags)
+    root.removeTagFromDocument(docId, root.inboxTagId, currentTags)
   }
 
   function deleteDocument(docId) {
-    if (root.previewDocId == docId) {
+    if (root.previewDocId === docId) {
       root.previewDocId = 0
     }
-    deleteDocProc.command = [
-      "curl", "-fsS", "-X", "DELETE",
-      "-H", "Authorization: Token " + root.paperlessToken,
-      root.paperlessUrl + "/api/documents/" + docId + "/"
-    ]
-    deleteDocProc.running = true
+    root.apiRequest("DELETE", "/api/documents/" + docId + "/", null, function() {
+      root.refresh()
+    })
   }
 
   function createCorrespondent(name) {
@@ -193,25 +353,60 @@ Panel {
       matching_algorithm: 6,
       is_insensitive: true
     }
-    createCorrProc.command = [
-      "curl", "-fsS", "-X", "POST",
-      "-H", "Authorization: Token " + root.paperlessToken,
-      "-H", "Content-Type: application/json",
-      "-d", JSON.stringify(data),
-      root.paperlessUrl + "/api/correspondents/"
-    ]
-    createCorrProc.running = true
+    root.apiRequest("POST", "/api/correspondents/", data, function() {
+      root.fetchCorrespondents()
+    })
   }
 
-  // Setup Wizard configuration writer (no sensitive data hardcoded)
   function saveConfiguration(url, token) {
-    var cfg = { url: url, token: token }
-    var cmd = "mkdir -p ~/.config/omarchy && cat << 'EOF' > ~/.config/omarchy/paperless.json\n"
-            + JSON.stringify(cfg, null, 2)
-            + "\nEOF\nchmod 600 ~/.config/omarchy/paperless.json"
+    var cleanUrl = url.trim()
+    while (cleanUrl.endsWith("/")) {
+      cleanUrl = cleanUrl.substring(0, cleanUrl.length - 1)
+    }
+
+    if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
+      console.log("Error: Invalid paperless URL protocol (must start with http:// or https://)")
+      return
+    }
+
+    var cfg = { url: cleanUrl, token: token.trim() }
+    
+    var cmd = "set -e\n"
+            + "DIR=\"$HOME/.config/omarchy\"\n"
+            + "mkdir -p \"$DIR\"\n"
+            + "chmod 700 \"$DIR\"\n"
+            + "TEMP_FILE=$(mktemp \"$DIR/paperless.json.XXXXXX\")\n"
+            + "cat > \"$TEMP_FILE\"\n"
+            + "chmod 600 \"$TEMP_FILE\"\n"
+            + "mv \"$TEMP_FILE\" \"$DIR/paperless.json\""
 
     saveConfigProc.command = ["bash", "-c", cmd]
+    saveConfigProc.stdinEnabled = true
     saveConfigProc.running = true
+    saveConfigProc.write(JSON.stringify(cfg, null, 2))
+    saveConfigProc.stdinEnabled = false
+  }
+
+  function loadConfiguration() {
+    var cmd = "FILE=\"$HOME/.config/omarchy/paperless.json\"\n"
+            + "if [ ! -e \"$FILE\" ]; then\n"
+            + "  exit 0\n"
+            + "fi\n"
+            + "if [ -f \"$FILE\" ] && [ ! -L \"$FILE\" ] && [ \"$(stat -c '%u' \"$FILE\")\" = \"$(id -u)\" ]; then\n"
+            + "  PERM=$(stat -c '%a' \"$FILE\")\n"
+            + "  if [ \"$PERM\" = \"600\" ] || [ \"$PERM\" = \"400\" ]; then\n"
+            + "    head -c 65536 \"$FILE\"\n"
+            + "  else\n"
+            + "    echo \"Error: insecure file permissions on paperless.json\" >&2\n"
+            + "    exit 1\n"
+            + "  fi\n"
+            + "else\n"
+            + "  echo \"Error: paperless.json is not a regular file, is a symlink, or has wrong owner\" >&2\n"
+            + "  exit 1\n"
+            + "fi"
+
+    configProc.command = ["bash", "-c", cmd]
+    configProc.running = true
   }
 
   // Theme values
@@ -219,13 +414,12 @@ Panel {
   readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
 
   Component.onCompleted: {
-    configProc.running = true
+    root.loadConfiguration()
   }
 
   Process {
     id: configProc
     running: false
-    command: ["cat", "/home/sebastian/.config/omarchy/paperless.json"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -235,8 +429,8 @@ Panel {
             var cfg = JSON.parse(raw)
             root.paperlessUrl = cfg.url
             root.paperlessToken = cfg.token
-            fetchCorrespondentsProc.running = true
-            fetchTagsProc.running = true
+            root.fetchCorrespondents()
+            root.fetchTags()
             root.refresh()
           } catch(e) {
             console.log("Error parsing paperless config:", e)
@@ -247,87 +441,9 @@ Panel {
   }
 
   Process {
-    id: fetchCorrespondentsProc
-    running: false
-    command: ["curl", "-fsS", "-H", "Authorization: Token " + root.paperlessToken, root.paperlessUrl + "/api/correspondents/?page_size=1000"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var raw = String(text || "").trim()
-        if (raw) {
-          try {
-            var data = JSON.parse(raw)
-            if (data && data.results) {
-              root.correspondents = data.results
-              root.rebuildCorrespondentOptions()
-            }
-          } catch(e) {
-            console.log("Error parsing correspondents:", e)
-          }
-        }
-      }
-    }
-  }
-
-  Process {
-    id: fetchTagsProc
-    running: false
-    command: ["curl", "-fsS", "-H", "Authorization: Token " + root.paperlessToken, root.paperlessUrl + "/api/tags/?page_size=1000"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var raw = String(text || "").trim()
-        if (raw) {
-          try {
-            var data = JSON.parse(raw)
-            if (data && data.results) {
-              root.tags = data.results
-              for (var i = 0; i < data.results.length; i++) {
-                if (data.results[i].is_inbox_tag) {
-                  root.inboxTagId = data.results[i].id
-                  break
-                }
-              }
-            }
-          } catch(e) {
-            console.log("Error parsing tags:", e)
-          }
-        }
-      }
-    }
-  }
-
-  Process {
-    id: fetchInboxProc
-    running: false
-    command: ["curl", "-fsS", "-H", "Authorization: Token " + root.paperlessToken, root.paperlessUrl + "/api/documents/?is_in_inbox=true&limit=100"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.isFetching = false
-        var raw = String(text || "").trim()
-        if (raw) {
-          try {
-            var data = JSON.parse(raw)
-            if (data && data.results) {
-              root.inboxDocuments = data.results
-              root.inboxCount = data.count !== undefined ? data.count : data.results.length
-              root.downloadThumbnails(data.results)
-            }
-          } catch(e) {
-            console.log("Error parsing inbox documents:", e)
-          }
-        }
-      }
-    }
-    onExited: {
-      root.isFetching = false
-    }
-  }
-
-  Process {
     id: downloadThumbsProc
     running: false
+    stdinEnabled: true
     onExited: function(exitCode) {
       if (exitCode === 0) {
         root.thumbBuster++
@@ -335,52 +451,15 @@ Panel {
     }
   }
 
-
-
-  Process {
-    id: patchDocProc
-    running: false
-    stdout: StdioCollector { waitForEnd: true }
-    stderr: StdioCollector { waitForEnd: true; onStreamFinished: console.log("PATCH API Error details:", text) }
-    onExited: function(exitCode) {
-      if (exitCode === 0) {
-        root.refresh()
-      } else {
-        console.log("PATCH API failed with exit code:", exitCode)
-      }
-    }
-  }
-
-  Process {
-    id: deleteDocProc
-    running: false
-    stdout: StdioCollector { waitForEnd: true }
-    stderr: StdioCollector { waitForEnd: true; onStreamFinished: console.log("DELETE API Error details:", text) }
-    onExited: function(exitCode) {
-      if (exitCode === 0) {
-        root.refresh()
-      } else {
-        console.log("DELETE API failed with exit code:", exitCode)
-      }
-    }
-  }
-
-  Process {
-    id: createCorrProc
-    running: false
-    onExited: function(exitCode) {
-      if (exitCode === 0) {
-        fetchCorrespondentsProc.running = true
-      }
-    }
-  }
-
   Process {
     id: saveConfigProc
     running: false
+    stdinEnabled: true
     onExited: function(exitCode) {
       if (exitCode === 0) {
-        configProc.running = true
+        root.loadConfiguration()
+      } else {
+        console.log("Failed to save configuration")
       }
     }
   }
@@ -536,7 +615,7 @@ Panel {
             Image {
               id: largeImage
               anchors.fill: parent
-              source: root.previewDocId !== 0 ? ("file:///tmp/paperless_thumbs/" + root.previewDocId + ".png?v=" + root.thumbBuster) : ""
+              source: root.previewDocId !== 0 ? ("file://" + root.thumbDir + "/" + root.previewDocId + ".png?v=" + root.thumbBuster) : ""
               fillMode: Image.PreserveAspectFit
               asynchronous: true
               smooth: true
@@ -563,7 +642,7 @@ Panel {
 
               Image {
                 id: zoomImage
-                source: "file:///tmp/paperless_thumbs/" + root.previewDocId + ".png?v=" + root.thumbBuster
+                source: root.previewDocId !== 0 ? ("file://" + root.thumbDir + "/" + root.previewDocId + ".png?v=" + root.thumbBuster) : ""
                 fillMode: Image.PreserveAspectFit
                 smooth: true
                 asynchronous: true
@@ -769,7 +848,7 @@ Panel {
                       Image {
                         id: thumbImage
                         anchors.fill: parent
-                        source: "file:///tmp/paperless_thumbs/" + docObj.id + ".png?v=" + root.thumbBuster
+                        source: "file://" + root.thumbDir + "/" + docObj.id + ".png?v=" + root.thumbBuster
                         fillMode: Image.PreserveAspectFit
                         asynchronous: true
                         smooth: true
@@ -894,6 +973,7 @@ Panel {
 
                     Text {
                       text: docObj.title
+                      textFormat: Text.PlainText
                       color: root.contentForeground
                       font.family: root.contentFontFamily
                       font.pixelSize: Style.font.body
@@ -948,6 +1028,7 @@ Panel {
 
                         Text {
                           text: docObj.created_date || docObj.created || "Unknown"
+                          textFormat: Text.PlainText
                           color: root.contentForeground
                           font.family: root.contentFontFamily
                           font.pixelSize: Style.font.body
@@ -993,6 +1074,7 @@ Panel {
 
                               Text {
                                 text: tagObj ? tagObj.name : ""
+                                textFormat: Text.PlainText
                                 color: tagObj ? tagObj.text_color : "#ffffff"
                                 font.family: root.contentFontFamily
                                 font.pixelSize: Style.font.caption
