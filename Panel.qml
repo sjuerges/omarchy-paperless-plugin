@@ -529,7 +529,7 @@ Panel {
           var raw = String(apiStdout.text || "").trim()
           if (onSuccess) {
             try {
-              var parsed = JSON.parse(raw)
+              var parsed = raw === "" ? null : JSON.parse(raw)
               onSuccess(parsed)
             } catch (e) {
               console.log("Failed to parse response JSON:", e)
