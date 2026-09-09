@@ -162,6 +162,7 @@ Panel {
             + "  HTTP_CODE=\"\"\n"
             + "  if [ -s \"$HEADER_OUT\" ]; then\n"
             + "    read -r _ HTTP_CODE _ < \"$HEADER_OUT\"\n"
+            + "    HTTP_CODE=$(echo \"$HTTP_CODE\" | tr -d '\\r\\n[:space:]')\n"
             + "  fi\n"
             + "  SIZE=$(stat -c %s \"$TEMP_OUT\")\n"
             + "  if [ \"$SIZE\" -gt 5242880 ]; then\n"
@@ -186,6 +187,7 @@ Panel {
 
     var proc = apiProcComponent.createObject(root, {
       "command": args,
+      "method": method,
       "onSuccess": onSuccess,
       "onFailure": onFailure
     })
@@ -381,11 +383,15 @@ Panel {
   }
 
   function deleteDocument(docId) {
+    console.log("DELETE document called for docId:", docId)
     if (root.previewDocId === docId) {
       root.previewDocId = 0
     }
     root.apiRequest("DELETE", "/api/documents/" + docId + "/", null, function() {
+      console.log("DELETE document success for docId:", docId)
       root.refresh()
+    }, function(err) {
+      console.log("DELETE document failed for docId:", docId, "error:", err)
     })
   }
 
@@ -511,6 +517,7 @@ Panel {
     Process {
       id: proc
       stdinEnabled: true
+      property string method: ""
       property var onSuccess
       property var onFailure
 
@@ -529,10 +536,20 @@ Panel {
           var raw = String(apiStdout.text || "").trim()
           if (onSuccess) {
             try {
-              var parsed = raw === "" ? null : JSON.parse(raw)
+              var parsed = null
+              if (raw !== "" && proc.method !== "DELETE") {
+                try {
+                  parsed = JSON.parse(raw)
+                } catch (jsonErr) {
+                  console.log("Failed to parse response JSON (length=" + raw.length + ", content='" + raw + "'):", jsonErr)
+                  if (proc.method === "GET") {
+                    throw jsonErr
+                  }
+                }
+              }
               onSuccess(parsed)
             } catch (e) {
-              console.log("Failed to parse response JSON:", e)
+              console.log("Error processing success callback:", e)
               if (onFailure) onFailure("Parse Error")
             }
           }
