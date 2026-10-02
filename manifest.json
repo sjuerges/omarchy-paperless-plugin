@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "paperless",
   "name": "paperless-ngx-inbox",
-  "version": "1.4.4",
+  "version": "1.5.0",
   "author": "Sebastian & Gemini CLI",
   "description": "Paperless-ngx inbox and document manager in your top bar",
   "kinds": [

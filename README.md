@@ -7,11 +7,13 @@ A beautiful, highly integrated status bar widget and sliding inbox details panel
 ## Features
 
 - **Top Bar Badge**: Displays a modern, leaf icon  alongside the live count of items currently in your Paperless-ngx inbox.
+- **Document Upload**: Click **+ Ajouter des documents** to open a file picker. Select one or more files (PDF, PNG, JPG, TIFF). Files are uploaded sequentially to Paperless via the official API. Status is tracked in real time (Waiting → Uploading → Processing → Done).
+- **Task Tracking**: After upload, the plugin polls Paperless tasks to track consumption status (OCR, classification, indexing). Status updates automatically in the panel.
 - **Interactive Sliding Preview Panel**: 
-  - Left-click on any document's thumbnail to smoothly expand the panel width from a snug `720px` to a generous `1120px`, opening a large, high-resolution preview of the document.
+  - Left-click on any document's thumbnail to smoothly expand the panel width, opening a large, high-resolution preview with a magnifying glass lens.
   - Clicking the large preview or the thumbnail again instantly slides it closed.
-  - Uses highly cached local `/tmp/` WebP thumbnails for **instantaneous zero-latency rendering** (no network spinner delay).
-- **Setup Wizard on First Usage**: If credentials aren't configured yet, opening the panel reveals a sleek, secure QML setup form. Simply enter your Server URL and API Token, click **Save & Connect**, and the plugin securely writes the configuration file and connects.
+  - Uses highly cached local WebP thumbnails for **instantaneous zero-latency rendering**.
+- **Setup Wizard on First Usage**: If credentials aren't configured yet, opening the panel reveals a secure QML setup form. Enter your Server URL and API Token, click **Save & Connect**.
 - **Done Action**: A single click on the `Done` button removes the `Inbox` tag from the document, immediately removing it from your top bar badge list.
 - **Single-click Deletion / Trash**: A dedicated red `Delete` button instantly moves the document to your server's trash/deletes it.
 - **Searchable Correspondent Picker**: Change a document's correspondent on the fly. Dynamically fetches and indexes your full **correspondent database** in a searchable filter box.
@@ -19,7 +21,7 @@ A beautiful, highly integrated status bar widget and sliding inbox details panel
   - Horizontal `Flow` layout renders your current tags with their native Paperless-ngx custom background and text colors.
   - Click the `x` delete button on any tag to remove it instantly.
   - Use the `+ Add Tag` dropdown list (which intelligently filters out tags already applied) to assign new tags to your documents.
-- **Inline Correspondent Creator**: Type a new name in the text field at the top and press Enter (or click `+ Add Corr`) to instantly create a new correspondent on your server, immediately refreshing and syncing across all dropdowns.
+- **Inline Correspondent Creator**: Type a new name in the text field and press Enter (or click `+ Add Corr`) to instantly create a new correspondent on your server, with visual success/error feedback.
 
 ---
 
@@ -49,6 +51,24 @@ The JSON structure contains:
 }
 ```
 *The plugin automatically enforces a secure `0600` file permission (readable/writable only by the owner).*
+
+### TLS Certificate (Self-Signed / Private CA)
+
+If your Paperless-ngx instance uses a self-signed or private CA certificate, the plugin will fail API requests with `SSL certificate verify result: self-signed certificate`.
+
+To fix this, export your server's certificate and place it at:
+```
+~/.config/omarchy/paperless-ca.pem
+```
+
+For example:
+```bash
+openssl s_client -connect your-paperless-host:443 -servername your-paperless-host </dev/null \
+  | openssl x509 > ~/.config/omarchy/paperless-ca.pem
+chmod 600 ~/.config/omarchy/paperless-ca.pem
+```
+
+The plugin will automatically use this CA file for all curl requests when present, without disabling TLS validation.
 
 ---
 

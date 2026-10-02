@@ -31,7 +31,6 @@ Panel {
 
   readonly property string thumbDir: (Quickshell.env("XDG_RUNTIME_DIR") ? Quickshell.env("XDG_RUNTIME_DIR") : (Quickshell.env("HOME") || "") + "/.cache") + "/omarchy/paperless_thumbs"
 
-  // Smoothly animated panel width
   readonly property real targetWidth: Style.space(720) + (previewDocId !== 0 ? largePreview.width + Style.space(14) : 0)
   property real currentPanelWidth: Style.space(720)
 
@@ -44,11 +43,19 @@ Panel {
   property var openDropdownsList: []
   readonly property bool someDropdownOpen: openDropdownsList.length > 0
 
+  // --- Upload queue ---
+  property var uploadQueue: []
+  property bool isUploading: false
+  property string corrFeedback: ""
+  property bool corrFeedbackIsError: false
+
+  readonly property var supportedFormats: ["pdf", "png", "jpg", "jpeg", "tiff", "tif"]
+
   onOpenedChanged: {
     if (opened) {
       root.refresh()
     } else {
-      root.previewDocId = 0 // Reset preview when closed
+      root.previewDocId = 0
     }
   }
 
@@ -198,6 +205,8 @@ Panel {
             + "}\n"
             + "trap cleanup EXIT\n"
             + "printf 'request = \"%s\"\\nurl = \"%s\"\\nheader = \"Authorization: Token %s\"\\n' \"$METHOD\" \"$URL\" \"$TOKEN\" > \"$CURL_CFG\"\n"
+            + "CA_FILE=\"$HOME/.config/omarchy/paperless-ca.pem\"\n"
+            + "if [ -r \"$CA_FILE\" ]; then printf 'cacert = \"%s\"\\n' \"$CA_FILE\" >> \"$CURL_CFG\"; fi\n"
             + "if [ -n \"$BODY_TEMP\" ]; then\n"
             + "  printf 'header = \"Content-Type: application/json\"\\ndata-binary = \"@%s\"\\n' \"$BODY_TEMP\" >> \"$CURL_CFG\"\n"
             + "fi\n"
@@ -243,6 +252,241 @@ Panel {
     proc.running = true
     proc.write(root.paperlessToken + "\n" + (bodyData ? JSON.stringify(bodyData) : "") + "\n")
     proc.stdinEnabled = false
+  }
+
+  // --- Upload a document via multipart/form-data ---
+  function uploadDocument(filePath, correspondentId) {
+    if (!root.paperlessUrl || !root.paperlessToken) {
+      return
+    }
+
+    var cmd = "read -r TOKEN\n"
+            + "FILE_PATH=\"$1\"\n"
+            + "CORR=\"$2\"\n"
+            + "URL=\"$3\"\n"
+            + "if [ ! -f \"$FILE_PATH\" ] || [ ! -r \"$FILE_PATH\" ]; then\n"
+            + "  echo \"File not found or not readable: $FILE_PATH\" >&2\n"
+            + "  exit 1\n"
+            + "fi\n"
+            + "TEMP_OUT=$(mktemp)\n"
+            + "HEADER_OUT=$(mktemp)\n"
+            + "chmod 600 \"$TEMP_OUT\" \"$HEADER_OUT\"\n"
+            + "cleanup() {\n"
+            + "  rm -f \"$TEMP_OUT\" \"$HEADER_OUT\"\n"
+            + "}\n"
+            + "trap cleanup EXIT\n"
+            + "CA_ARGS=()\n"
+            + "CA_FILE=\"$HOME/.config/omarchy/paperless-ca.pem\"\n"
+            + "if [ -r \"$CA_FILE\" ]; then CA_ARGS=(--cacert \"$CA_FILE\"); fi\n"
+            + "EXTRA_FORM=\"\"\n"
+            + "if [ -n \"$CORR\" ]; then\n"
+            + "  EXTRA_FORM=\"--form correspondent=$CORR\"\n"
+            + "fi\n"
+            + "curl -s --connect-timeout 10 --max-time 120 \"${CA_ARGS[@]}\" \\\n"
+            + "  -H \"Authorization: Token $TOKEN\" \\\n"
+            + "  -F \"document=@$FILE_PATH\" \\\n"
+            + "  $EXTRA_FORM \\\n"
+            + "  -D \"$HEADER_OUT\" \\\n"
+            + "  \"$URL\" \\\n"
+            + "  > \"$TEMP_OUT\" 2>/dev/null\n"
+            + "CURL_EXIT=$?\n"
+            + "HTTP_CODE=\"\"\n"
+            + "if [ -s \"$HEADER_OUT\" ]; then\n"
+            + "  read -r _ HTTP_CODE _ < \"$HEADER_OUT\"\n"
+            + "  HTTP_CODE=$(echo \"$HTTP_CODE\" | tr -d '\\r\\n[:space:]')\n"
+            + "fi\n"
+            + "if [ \"$CURL_EXIT\" -eq 0 ] && [ -n \"$HTTP_CODE\" ] && [ \"$HTTP_CODE\" -ge 200 ] && [ \"$HTTP_CODE\" -lt 300 ]; then\n"
+            + "  cat \"$TEMP_OUT\"\n"
+            + "  exit 0\n"
+            + "else\n"
+            + "  echo \"HTTP Error: $HTTP_CODE (curl exit: $CURL_EXIT)\" >&2\n"
+            + "  cat \"$TEMP_OUT\" >&2\n"
+            + "  exit 3\n"
+            + "fi"
+
+    var url = root.paperlessUrl + "/api/documents/post_document/"
+    var args = ["bash", "-c", cmd, "upload-script", filePath, String(correspondentId || ""), url]
+    // $0=upload-script, $1=filePath, $2=correspondentId, $3=url
+
+    var proc = apiProcComponent.createObject(root, {
+      "command": args,
+      "method": "POST"
+    })
+
+    proc.onSuccess = function(data) { root.onUploadSuccess(filePath, data) }
+    proc.onFailure = function(err) { root.onUploadFailure(filePath, err) }
+
+    proc.stdinEnabled = true
+    proc.running = true
+    proc.write(root.paperlessToken + "\n")
+    proc.stdinEnabled = false
+  }
+
+  function onUploadSuccess(filePath, data) {
+    var taskId = null
+    if (data && typeof data === "string") {
+      taskId = data.replace(/"/g, "").trim()
+    } else if (data && typeof data === "object") {
+      taskId = data.task_id || data.id || null
+    }
+
+    for (var i = 0; i < root.uploadQueue.length; i++) {
+      if (root.uploadQueue[i].path === filePath) {
+        root.uploadQueue[i].status = "submitted"
+        root.uploadQueue[i].taskId = taskId
+        break
+      }
+    }
+    root.uploadQueue = root.uploadQueue.slice()
+
+    if (taskId) {
+      root.pollTaskStatus(filePath, taskId)
+    }
+
+    root.processUploadQueue()
+  }
+
+  function onUploadFailure(filePath, err) {
+    for (var i = 0; i < root.uploadQueue.length; i++) {
+      if (root.uploadQueue[i].path === filePath) {
+        root.uploadQueue[i].status = "error"
+        root.uploadQueue[i].error = err || "Upload failed"
+        break
+      }
+    }
+    root.uploadQueue = root.uploadQueue.slice()
+    root.processUploadQueue()
+  }
+
+  // --- Task polling ---
+  function pollTaskStatus(filePath, taskId) {
+    if (!root.paperlessUrl || !root.paperlessToken) return
+
+    var endpoint = "/api/tasks/?task_id=" + taskId
+    root.apiRequest("GET", endpoint, null, function(data) {
+      var tasks = null
+      if (Array.isArray(data)) {
+        tasks = data
+      } else if (data && Array.isArray(data.results)) {
+        tasks = data.results
+      }
+
+      if (!tasks || tasks.length === 0) {
+        return
+      }
+
+      var task = tasks[0]
+      var status = (task.status || "").toLowerCase()
+
+      for (var i = 0; i < root.uploadQueue.length; i++) {
+        if (root.uploadQueue[i].path === filePath) {
+          if (status === "success") {
+            root.uploadQueue[i].status = "completed"
+            root.uploadQueue[i].relatedDocument = task.related_document_ids || null
+            root.uploadQueue[i].result = task.result_data || ""
+            root.uploadQueue = root.uploadQueue.slice()
+            root.refresh()
+          } else if (status === "failure" || status === "revoked") {
+            root.uploadQueue[i].status = "error"
+            root.uploadQueue[i].error = task.result_data || "Processing failed"
+            root.uploadQueue = root.uploadQueue.slice()
+          } else {
+            setTimeout(function() { root.pollTaskStatus(filePath, taskId) }, 3000)
+          }
+          break
+        }
+      }
+    })
+  }
+
+  function setTimeout(callback, delay) {
+    var timer = timerComponent.createObject(root, { interval: delay })
+    timer.triggered.connect(function() {
+      timer.destroy()
+      callback()
+    })
+    timer.start()
+  }
+
+  // --- Upload queue processing ---
+  function processUploadQueue() {
+    if (root.isUploading) return
+
+    for (var i = 0; i < root.uploadQueue.length; i++) {
+      if (root.uploadQueue[i].status === "waiting") {
+        root.isUploading = true
+        root.uploadQueue[i].status = "uploading"
+        root.uploadQueue = root.uploadQueue.slice()
+        root.uploadDocument(root.uploadQueue[i].path, root.uploadQueue[i].correspondentId)
+        return
+      }
+    }
+
+    root.isUploading = false
+  }
+
+  function addFilesToQueue(filePaths) {
+    for (var i = 0; i < filePaths.length; i++) {
+      var fp = filePaths[i].trim()
+      if (fp === "") continue
+
+      var ext = fp.split(".").pop().toLowerCase()
+      var supported = false
+      for (var j = 0; j < root.supportedFormats.length; j++) {
+        if (ext === root.supportedFormats[j]) {
+          supported = true
+          break
+        }
+      }
+
+      var fileName = fp.split("/").pop()
+
+      root.uploadQueue.push({
+        path: fp,
+        name: fileName,
+        status: supported ? "waiting" : "unsupported",
+        error: supported ? "" : "Unsupported format: ." + ext,
+        taskId: null,
+        relatedDocument: null,
+        result: ""
+      })
+    }
+    root.uploadQueue = root.uploadQueue.slice()
+    root.processUploadQueue()
+  }
+
+  // --- File picker via zenity ---
+  function openFilePicker() {
+    var cmd = "zenity --file-selection --multiple --title=\"Select documents for Paperless\" "
+            + "--file-filter=\"PDF files | *.pdf\" "
+            + "--file-filter=\"Image files | *.png *.jpg *.jpeg *.tiff *.tif\" "
+            + "--file-filter=\"All files | *\" "
+            + "--filename=$HOME/ 2>/dev/null || true"
+
+    filePickerProc.command = ["bash", "-c", cmd]
+    filePickerProc.running = true
+  }
+
+  // --- Correspondent creation with feedback ---
+  function createCorrespondent(name) {
+    root.corrFeedback = ""
+    root.corrFeedbackIsError = false
+
+    var data = {
+      name: name,
+      matching_algorithm: 6,
+      is_insensitive: true
+    }
+    root.apiRequest("POST", "/api/correspondents/", data, function() {
+      root.corrFeedback = "Created: " + name
+      root.corrFeedbackIsError = false
+      root.fetchCorrespondents()
+      corrFeedbackTimer.restart()
+    }, function(err) {
+      root.corrFeedback = "Error: " + (err || "Failed to create")
+      root.corrFeedbackIsError = true
+      corrFeedbackTimer.restart()
+    })
   }
 
   function fetchCorrespondents() {
@@ -454,17 +698,6 @@ Panel {
     })
   }
 
-  function createCorrespondent(name) {
-    var data = {
-      name: name,
-      matching_algorithm: 6,
-      is_insensitive: true
-    }
-    root.apiRequest("POST", "/api/correspondents/", data, function() {
-      root.fetchCorrespondents()
-    })
-  }
-
   function saveConfiguration(url, token) {
     var cleanUrl = url.trim()
     while (cleanUrl.endsWith("/")) {
@@ -477,7 +710,7 @@ Panel {
     }
 
     var cfg = { url: cleanUrl, token: token.trim() }
-    
+
     var cmd = "set -e\n"
             + "DIR=\"$HOME/.config/omarchy\"\n"
             + "mkdir -p \"$DIR\"\n"
@@ -524,6 +757,7 @@ Panel {
     root.loadConfiguration()
   }
 
+  // --- Processes ---
   Process {
     id: configProc
     running: false
@@ -579,6 +813,39 @@ Panel {
     }
   }
 
+  Process {
+    id: filePickerProc
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var raw = String(text || "").trim()
+        if (raw) {
+          var files = raw.split("\n")
+          root.addFilesToQueue(files)
+        }
+      }
+    }
+  }
+
+  Timer {
+    id: corrFeedbackTimer
+    interval: 4000
+    running: false
+    repeat: false
+    onTriggered: {
+      root.corrFeedback = ""
+    }
+  }
+
+  Component {
+    id: timerComponent
+    Timer {
+      running: false
+      repeat: false
+    }
+  }
+
   Component {
     id: apiProcComponent
     Process {
@@ -592,7 +859,7 @@ Panel {
         id: apiStdout
         waitForEnd: true
       }
-      
+
       stderr: StdioCollector {
         id: apiStderr
         waitForEnd: true
@@ -608,7 +875,7 @@ Panel {
                 try {
                   parsed = JSON.parse(raw)
                 } catch (jsonErr) {
-                  console.log("Failed to parse response JSON (length=" + raw.length + ", content='" + raw + "'):", jsonErr)
+                  console.log("Failed to parse response JSON (length=" + raw.length + "):", jsonErr)
                   if (proc.method === "GET") {
                     throw jsonErr
                   }
@@ -636,6 +903,7 @@ Panel {
     }
   }
 
+  // --- UI ---
   KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
@@ -653,7 +921,7 @@ Panel {
       blocked: root.someDropdownOpen || newCorrField.activeFocus || setupUrlField.activeFocus || setupTokenField.activeFocus
       onCloseRequested: root.close()
 
-      // Dynamic Setup Wizard Layout
+      // --- Setup Wizard ---
       Column {
         id: setupColumn
         visible: root.paperlessUrl === "" || root.paperlessToken === ""
@@ -663,7 +931,7 @@ Panel {
         Row {
           spacing: Style.space(10)
           Text {
-            text: ""
+            text: ""
             color: root.contentForeground
             font.family: root.contentFontFamily
             font.pixelSize: 22
@@ -677,9 +945,7 @@ Panel {
           }
         }
 
-        PanelSeparator {
-          width: parent.width
-        }
+        PanelSeparator { width: parent.width }
 
         Text {
           text: "Connect your status bar to your Paperless-ngx instance. Your credentials will be stored securely on your local machine."
@@ -758,14 +1024,14 @@ Panel {
         }
       }
 
-      // Sliding Panel & Document List Row
+      // --- Main Panel ---
       Row {
         id: panelRow
         visible: root.paperlessUrl !== "" && root.paperlessToken !== ""
         anchors.fill: parent
         spacing: Style.space(14)
 
-        // Large Preview Panel (on the left)
+        // Large Preview Panel
         BorderSurface {
           id: largePreview
           width: root.previewDocId !== 0 ? (largeImage.status === Image.Ready ? Math.min(Style.space(400), (largePreview.height - Style.space(24)) * (largeImage.implicitWidth / largeImage.implicitHeight) + Style.space(24)) : Style.space(250)) : 0
@@ -793,23 +1059,20 @@ Panel {
               smooth: true
             }
 
-            // Beautiful Magnifier/Zoom Lens
             Rectangle {
               id: zoomLens
-              // Lens stays centered on mouse but clamped within the previewMouseArea bounds
               x: Math.max(0, Math.min(previewMouseArea.width - width, previewMouseArea.mouseX - width / 2))
               y: Math.max(0, Math.min(previewMouseArea.height - height, previewMouseArea.mouseY - height / 2))
               width: Style.space(200)
               height: Style.space(200)
               radius: width / 2
-              color: "#1a1a1a" // Dark fallback background for high contrast
+              color: "#1a1a1a"
               border.color: Color.accent
               border.width: Style.space(3)
               clip: true
               visible: previewMouseArea.containsMouse && root.previewDocId !== 0
-              enabled: false // Transparent to hover/mouse events
+              enabled: false
 
-              // Magnification factor
               property real scaleFactor: 2.2
 
               Image {
@@ -820,14 +1083,11 @@ Panel {
                 asynchronous: true
                 width: largeImage.width * zoomLens.scaleFactor
                 height: largeImage.height * zoomLens.scaleFactor
-
-                // Position the magnified source relative to the lens so that the point under the mouse is centered
                 x: zoomLens.width / 2 - previewMouseArea.mouseX * zoomLens.scaleFactor
                 y: zoomLens.height / 2 - previewMouseArea.mouseY * zoomLens.scaleFactor
               }
             }
 
-            // Click image to close/shrink (placed on top of zoomLens so zoomLens never intercepts events)
             MouseArea {
               id: previewMouseArea
               anchors.fill: parent
@@ -840,11 +1100,11 @@ Panel {
           }
         }
 
-        // Main List Column (on the right)
+        // --- Main Column ---
         Column {
           id: mainColumn
           width: parent.width - largePreview.width - (largePreview.visible ? panelRow.spacing : 0)
-          spacing: Style.space(14)
+          spacing: Style.space(10)
 
           // Title bar
           Item {
@@ -858,7 +1118,7 @@ Panel {
               spacing: Style.space(10)
 
               Text {
-                text: ""
+                text: ""
                 color: root.contentForeground
                 font.family: root.contentFontFamily
                 font.pixelSize: 22
@@ -884,14 +1144,159 @@ Panel {
             }
           }
 
-          PanelSeparator {
+          PanelSeparator { width: parent.width }
+
+          // --- Upload section ---
+          Rectangle {
             width: parent.width
+            height: uploadColumn.implicitHeight + Style.space(16)
+            radius: Style.cornerRadius
+            color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.03)
+            border.width: 1
+            border.color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08)
+
+            Column {
+              id: uploadColumn
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: Style.space(8)
+              spacing: Style.space(6)
+
+              // Add documents button
+              Rectangle {
+                width: parent.width
+                height: Style.space(32)
+                radius: Style.cornerRadius
+                color: addDocMouse.containsMouse ? Color.accent : Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08)
+
+                Text {
+                  anchors.centerIn: parent
+                  text: "+ Add documents"
+                  color: addDocMouse.containsMouse ? "#ffffff" : root.contentForeground
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                }
+
+                MouseArea {
+                  id: addDocMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.openFilePicker()
+                }
+              }
+
+              // Upload queue
+              Repeater {
+                model: root.uploadQueue
+
+                delegate: Row {
+                  required property var modelData
+                  width: uploadColumn.width
+                  spacing: Style.space(6)
+
+                  Text {
+                    text: {
+                      var s = modelData.status
+                      if (s === "waiting") return "⏳"
+                      if (s === "uploading") return "⬆"
+                      if (s === "submitted") return "⏳"
+                      if (s === "completed") return "✓"
+                      if (s === "error") return "✗"
+                      if (s === "unsupported") return "⚠"
+                      return "•"
+                    }
+                    color: {
+                      var s = modelData.status
+                      if (s === "completed") return "#4caf50"
+                      if (s === "error" || s === "unsupported") return Color.urgent
+                      return root.contentForeground
+                    }
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                    width: Style.space(16)
+                  }
+
+                  Text {
+                    text: modelData.name
+                    color: root.contentForeground
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                    width: parent.width - Style.space(80)
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    text: {
+                      var s = modelData.status
+                      if (s === "waiting") return "Waiting"
+                      if (s === "uploading") return "Uploading..."
+                      if (s === "submitted") return "Processing..."
+                      if (s === "completed") return "Done"
+                      if (s === "error") return modelData.error || "Error"
+                      if (s === "unsupported") return "Unsupported"
+                      return s
+                    }
+                    color: {
+                      var s = modelData.status
+                      if (s === "completed") return "#4caf50"
+                      if (s === "error" || s === "unsupported") return Color.urgent
+                      return Qt.darker(root.contentForeground, 1.3)
+                    }
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                    width: Style.space(64)
+                    horizontalAlignment: Text.AlignRight
+                  }
+                }
+              }
+
+              // Clear completed button
+              Rectangle {
+                width: parent.width
+                height: Style.space(24)
+                radius: Style.space(4)
+                visible: {
+                  for (var i = 0; i < root.uploadQueue.length; i++) {
+                    if (root.uploadQueue[i].status === "completed" || root.uploadQueue[i].status === "error" || root.uploadQueue[i].status === "unsupported")
+                      return true
+                  }
+                  return false
+                }
+                color: clearQueueMouse.containsMouse ? Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.15) : "transparent"
+
+                Text {
+                  anchors.centerIn: parent
+                  text: "Clear completed"
+                  color: Qt.darker(root.contentForeground, 1.3)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                MouseArea {
+                  id: clearQueueMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    var cleaned = []
+                    for (var i = 0; i < root.uploadQueue.length; i++) {
+                      if (root.uploadQueue[i].status === "waiting" || root.uploadQueue[i].status === "uploading" || root.uploadQueue[i].status === "submitted")
+                        cleaned.push(root.uploadQueue[i])
+                    }
+                    root.uploadQueue = cleaned
+                  }
+                }
+              }
+            }
           }
 
-          // Quick Add Correspondent Row
+          // --- Correspondent quick-add ---
           Row {
             width: parent.width
-            spacing: Style.space(10)
+            spacing: Style.space(6)
 
             TextField {
               id: newCorrField
@@ -938,9 +1343,18 @@ Panel {
             }
           }
 
-          PanelSeparator {
+          // Correspondent feedback
+          Text {
+            visible: root.corrFeedback !== ""
+            text: root.corrFeedback
+            color: root.corrFeedbackIsError ? Color.urgent : "#4caf50"
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
             width: parent.width
+            wrapMode: Text.WordWrap
           }
+
+          PanelSeparator { width: parent.width }
 
           // Empty state
           Text {
@@ -955,7 +1369,7 @@ Panel {
             bottomPadding: Style.space(24)
           }
 
-          // Loading state when empty
+          // Loading state
           Text {
             visible: root.inboxDocuments.length === 0 && root.isFetching
             text: "Loading inbox..."
@@ -968,11 +1382,11 @@ Panel {
             bottomPadding: Style.space(24)
           }
 
-          // Scrollable document list
+          // Document list
           Flickable {
             visible: root.inboxDocuments.length > 0
             width: parent.width
-            height: root.previewDocId !== 0 ? Style.space(520) : Math.min(Style.space(480), documentsColumn.implicitHeight)
+            height: root.previewDocId !== 0 ? Style.space(420) : Math.min(Style.space(480), documentsColumn.implicitHeight)
             contentWidth: width
             contentHeight: documentsColumn.implicitHeight
             clip: true
@@ -984,15 +1398,15 @@ Panel {
             Column {
               id: documentsColumn
               width: parent.width
-              spacing: Style.space(12)
+              spacing: Style.space(10)
 
               Repeater {
                 model: root.inboxDocuments
 
                 delegate: BorderSurface {
                   id: cardDelegate
-                  required property var modelData // this is the document
-                  readonly property var docObj: modelData // alias to prevent name shadowing from nested repeaters
+                  required property var modelData
+                  readonly property var docObj: modelData
 
                   width: parent.width
                   implicitHeight: Math.max(Style.space(127), docColumn.implicitHeight) + Style.space(16)
@@ -1000,7 +1414,6 @@ Panel {
                   radius: Style.cornerRadius
                   borderSpec: Border.flat(Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08), 1)
 
-                  // Document thumbnail on the left (clickable to preview inline)
                   Item {
                     id: thumbnail
                     anchors.left: parent.left
@@ -1031,7 +1444,6 @@ Panel {
                         Behavior on opacity { NumberAnimation { duration: 120 } }
                       }
 
-                      // Magnifying glass overlay on hover
                       Rectangle {
                         visible: imgMouse.containsMouse
                         anchors.fill: parent
@@ -1068,7 +1480,6 @@ Panel {
                     }
                   }
 
-                  // Done / Delete action column on the right
                   Column {
                     id: actionCol
                     anchors.right: parent.right
@@ -1077,7 +1488,6 @@ Panel {
                     width: Style.space(90)
                     spacing: Style.space(6)
 
-                    // Done button
                     Rectangle {
                       width: Style.space(90)
                       height: Style.space(28)
@@ -1104,7 +1514,6 @@ Panel {
                       }
                     }
 
-                    // Delete button
                     Rectangle {
                       width: Style.space(90)
                       height: Style.space(28)
@@ -1132,7 +1541,6 @@ Panel {
                     }
                   }
 
-                  // Document details in the middle (auto-stretched)
                   Column {
                     id: docColumn
                     anchors.left: thumbnail.right
@@ -1141,7 +1549,7 @@ Panel {
                     anchors.leftMargin: Style.space(14)
                     anchors.rightMargin: Style.space(14)
                     anchors.topMargin: Style.space(8)
-                    spacing: Style.space(10)
+                    spacing: Style.space(8)
 
                     Text {
                       text: docObj.title
@@ -1154,7 +1562,6 @@ Panel {
                       elide: Text.ElideRight
                     }
 
-                    // Correspondent and date row
                     Row {
                       width: parent.width
                       spacing: Style.space(14)
@@ -1210,7 +1617,6 @@ Panel {
                       }
                     }
 
-                    // Tags section
                     Column {
                       width: parent.width
                       spacing: Style.space(4)
@@ -1231,7 +1637,7 @@ Panel {
                           model: docObj.tags
 
                           delegate: Rectangle {
-                            required property int modelData // this is the tag ID
+                            required property int modelData
                             property var tagObj: root.getTagObj(modelData)
                             visible: tagObj !== null
                             width: visible ? rowFlow.implicitWidth + Style.space(16) : 0

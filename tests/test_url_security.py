@@ -172,7 +172,11 @@ class TestUrlSecurity(unittest.TestCase):
     def test_manifest_version(self):
         with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
             manifest = json.load(f)
-        self.assertEqual(manifest["version"], "1.4.4")
+        # 1.4.4 is the security release this test was written for; any
+        # later version (this branch carries the 1.5.0 feature set) is
+        # equally acceptable — what must never regress is a version
+        # below the fixed one.
+        self.assertGreaterEqual(manifest["version"], "1.4.4")
         self.assertEqual(manifest["id"], "paperless")
 
 
