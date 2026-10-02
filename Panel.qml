@@ -109,26 +109,68 @@ Panel {
   }
 
   function isUrlSecure(url) {
-    var cleanUrl = url.trim()
-    if (cleanUrl.startsWith("https://")) {
-      return true
+    if (!url || typeof url !== "string") {
+      return false
     }
-    if (cleanUrl.startsWith("http://")) {
-      var remainder = ""
-      if (cleanUrl.startsWith("http://localhost")) {
-        remainder = cleanUrl.substring(16)
-      } else if (cleanUrl.startsWith("http://127.0.0.1")) {
-        remainder = cleanUrl.substring(16)
-      } else if (cleanUrl.startsWith("http://[::1]")) {
-        remainder = cleanUrl.substring(12)
-      } else {
+
+    var cleanUrl = url.trim()
+    if (!cleanUrl) {
+      return false
+    }
+
+    // Never allow credentials/userinfo or '@' in the URL to prevent host confusion
+    if (cleanUrl.indexOf("@") !== -1) {
+      return false
+    }
+
+    // Never allow query strings or fragments in Paperless base URL
+    if (cleanUrl.indexOf("?") !== -1 || cleanUrl.indexOf("#") !== -1) {
+      return false
+    }
+
+    // Reject whitespace, quotes, backslashes, and control characters
+    if (/[\s\r\n"'\\]/.test(cleanUrl) || /[\x00-\x1f\x7f]/.test(cleanUrl)) {
+      return false
+    }
+
+    try {
+      var parsed = new URL(cleanUrl)
+
+      // Strict protocol check: HTTPS or HTTP only
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
         return false
       }
-      if (remainder === "" || remainder.startsWith("/") || remainder.startsWith(":")) {
-        return true
+
+      // Reject userinfo if parsed by URL
+      if (parsed.username || parsed.password) {
+        return false
       }
+
+      // Hostname must be present
+      if (!parsed.hostname) {
+        return false
+      }
+
+      // For plain HTTP, ONLY allow localhost loopback addresses
+      if (parsed.protocol === "http:") {
+        var host = parsed.hostname.toLowerCase()
+        if (host !== "localhost" && host !== "127.0.0.1" && host !== "::1" && host !== "[::1]") {
+          return false
+        }
+      }
+
+      // If port is specified, validate it is numeric and within valid port range 1-65535
+      if (parsed.port) {
+        var portNum = parseInt(parsed.port, 10)
+        if (isNaN(portNum) || portNum < 1 || portNum > 65535 || String(portNum) !== parsed.port) {
+          return false
+        }
+      }
+
+      return true
+    } catch (e) {
+      return false
     }
-    return false
   }
 
   function apiRequest(method, endpoint, bodyData, onSuccess, onFailure) {
@@ -192,7 +234,11 @@ Panel {
             + "  exit 4\n"
             + "fi"
 
-    var url = root.paperlessUrl + endpoint
+    var base = root.paperlessUrl.trim()
+    while (base.endsWith("/")) {
+      base = base.substring(0, base.length - 1)
+    }
+    var url = base + endpoint
     var args = ["bash", "-c", cmd, "api-request-script", method, url]
 
     var proc = apiProcComponent.createObject(root, {
@@ -539,6 +585,16 @@ Panel {
 
   function downloadThumbnails(docs) {
     if (!docs || docs.length === 0) return
+    if (!root.paperlessUrl || !root.paperlessToken) return
+    if (!root.isUrlSecure(root.paperlessUrl)) {
+      console.log("Error: Insecure paperless URL configured:", root.paperlessUrl)
+      return
+    }
+
+    var base = root.paperlessUrl.trim()
+    while (base.endsWith("/")) {
+      base = base.substring(0, base.length - 1)
+    }
 
     var cmd = "read -r TOKEN\n"
             + "PAPERLESS_URL=\"$1\"\n"
@@ -570,7 +626,7 @@ Panel {
             + "  fi\n"
             + "done"
 
-    var args = ["bash", "-c", cmd, "download-script", root.paperlessUrl]
+    var args = ["bash", "-c", cmd, "download-script", base]
     for (var i = 0; i < docs.length; i++) {
       args.push(String(docs[i].id))
     }
@@ -712,9 +768,19 @@ Panel {
         if (raw) {
           try {
             var cfg = JSON.parse(raw)
-            root.paperlessUrl = cfg.url
-            root.paperlessToken = cfg.token
-            root.refresh()
+            var urlStr = typeof cfg.url === "string" ? cfg.url.trim() : ""
+            while (urlStr.endsWith("/")) {
+              urlStr = urlStr.substring(0, urlStr.length - 1)
+            }
+            if (urlStr && root.isUrlSecure(urlStr)) {
+              root.paperlessUrl = urlStr
+              root.paperlessToken = typeof cfg.token === "string" ? cfg.token.trim() : ""
+              root.refresh()
+            } else {
+              console.log("Error: Invalid or insecure paperless URL in configuration")
+              root.paperlessUrl = ""
+              root.paperlessToken = ""
+            }
           } catch(e) {
             console.log("Error parsing paperless config:", e)
           }
